@@ -303,8 +303,8 @@ func main() {
 			"{\"food\": \"Nombre del plato\", \"calories\": 0, \"protein\": 0, \"carbs\": 0, \"fat\": 0, \"fiber\": 0}"
 
 		log.Println("⏳ Enviando a Gemini...")
-		//resp, err := model.GenerateContent(ctx, genai.Text(promptText), genai.ImageData(mimeType, imgBytes))
-		resp, err := model.GenerateContent(ctx, genai.Text(promptText))
+		resp, err := model.GenerateContent(ctx, genai.Text(promptText), genai.ImageData(mimeType, imgBytes))
+		//resp, err := model.GenerateContent(ctx, genai.Text(promptText))
 		if err != nil {
 			log.Println(" Error de Gemini API:", err)
 			c.JSON(500, gin.H{"error": "Gemini falló al generar contenido", "details": err.Error()})
