@@ -86,18 +86,19 @@ type WaterRequest struct {
 }
 
 var (
-	requestLocks = make(map[string]time.Time)
-	lockMutex    = sync.Mutex{}
+	globalLastReq time.Time
+	lockMutex     sync.Mutex
 )
 
-func isRateLimited(ip string) bool {
+func isRateLimited() bool {
 	lockMutex.Lock()
 	defer lockMutex.Unlock()
-	lastReq, exists := requestLocks[ip]
-	if exists && time.Since(lastReq) < 10*time.Second {
+	if !globalLastReq.IsZero() && time.Since(globalLastReq) < 20*time.Second {
 		return true
 	}
-	requestLocks[ip] = time.Now()
+
+	// Si pasó el filtro, guardamos la hora actual y dejamos pasar
+	globalLastReq = time.Now()
 	return false
 }
 
@@ -267,11 +268,9 @@ func main() {
 	})
 
 	r.POST("/api/track", func(c *gin.Context) {
-		clientIp := c.ClientIP()
-		if isRateLimited(clientIp) {
-
-			log.Println("Peticion bloqueada por rate limit de IP:", clientIp)
-			c.JSON(429, gin.H{"error": "Demasiadas solicitudes. Por favor espera un momento."})
+		if isRateLimited() {
+			log.Println("Peticion bloqueada por rate limit GLOBAL BLOCK")
+			c.JSON(429, gin.H{"error": "Demasiadas solicitudes. Por favor espera 20 segundos."})
 			return
 		}
 		description := c.PostForm("description")
