@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -26,7 +27,7 @@ type Formulario struct {
 	IDFormulario      uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
 	Gender            string    `gorm:"type:varchar(6)"`
 	Edad              int
-	Peso              float64   `gorm:"type:numeric(5,2)"`
+	Peso              float64 `gorm:"type:numeric(5,2)"`
 	Altura            int
 	NivelActividad    string    `gorm:"type:varchar(20)"`
 	Cuello            float64   `gorm:"type:numeric(5,2)"`
@@ -40,12 +41,12 @@ type Formulario struct {
 type Macro struct {
 	IDMacro      uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
 	IDFormulario uuid.UUID `gorm:"type:uuid"`
-	Calories     int       
+	Calories     int
 	Protein      int
 	Carbs        int
 	Fat          int
 	Fiber        int
-	Water        float64   `gorm:"type:numeric(4,2)"`
+	Water        float64 `gorm:"type:numeric(4,2)"`
 }
 
 type DailyTrack struct {
@@ -56,7 +57,7 @@ type DailyTrack struct {
 	Carbs         int
 	Fat           int
 	Fiber         int
-	Water         int       
+	Water         int
 	DateTrack     time.Time `gorm:"type:date"`
 }
 
@@ -82,6 +83,22 @@ type GeminiNutritionResponse struct {
 
 type WaterRequest struct {
 	Amount int `json:"amount"`
+}
+
+var (
+	requestLocks = make(map[string]time.Time)
+	lockMutex    = sync.Mutex{}
+)
+
+func isRateLimited(ip string) bool {
+	lockMutex.Lock()
+	defer lockMutex.Unlock()
+	lastReq, exists := requestLocks[ip]
+	if exists && time.Since(lastReq) < 10*time.Second {
+		return true
+	}
+	requestLocks[ip] = time.Now()
+	return false
 }
 
 // ==========================================
@@ -143,7 +160,7 @@ func calcularRequerimientos(f Formulario) Macro {
 // 3. CONEXIÓN A BASE DATOS
 // ==========================================
 func initDB() *gorm.DB {
-	
+
 	dsn := "host=" + os.Getenv("PGHOST") + " user=" + os.Getenv("PGUSER") + " password=" + os.Getenv("PGPASSWORD") + " dbname=" + os.Getenv("PGDATABASE") + " port=5432 sslmode=" + os.Getenv("PGSSLMODE") + " channel_binding=" + os.Getenv("PGCHANNELBINDING")
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
@@ -176,7 +193,7 @@ func main() {
 
 	r.GET("/api/user/status", func(c *gin.Context) {
 		var form Formulario
-		
+
 		// 1. Verificar si hay un formulario registrado
 		if err := db.Order("fecha_registro desc").First(&form).Error; err != nil {
 			// Si no hay, mandamos isRegistered: false y terminamos
@@ -194,7 +211,7 @@ func main() {
 		var logs []FoodLog // Arreglo para guardar el historial de comidas
 
 		result := db.Where("date_track = ?", hoyStr).First(&track)
-		
+
 		if result.Error == nil {
 			// Si el usuario ya comió algo hoy, buscamos todas las comidas asociadas a este track
 			// (GORM devuelve un slice vacío automáticamente si no encuentra nada, no se cae)
@@ -231,10 +248,14 @@ func main() {
 		f.FechaRegistro = time.Now()
 
 		err := db.Transaction(func(tx *gorm.DB) error {
-			if err := tx.Create(&f).Error; err != nil { return err }
+			if err := tx.Create(&f).Error; err != nil {
+				return err
+			}
 			macrosCalculados := calcularRequerimientos(f)
 			macrosCalculados.IDFormulario = f.IDFormulario
-			if err := tx.Create(&macrosCalculados).Error; err != nil { return err }
+			if err := tx.Create(&macrosCalculados).Error; err != nil {
+				return err
+			}
 			return nil
 		})
 
@@ -246,6 +267,13 @@ func main() {
 	})
 
 	r.POST("/api/track", func(c *gin.Context) {
+		clientIp := c.ClientIP()
+		if isRateLimited(clientIp) {
+
+			log.Println("Peticion bloqueada por rate limit de IP:", clientIp)
+			c.JSON(429, gin.H{"error": "Demasiadas solicitudes. Por favor espera un momento."})
+			return
+		}
 		description := c.PostForm("description")
 		file, header, err := c.Request.FormFile("image")
 		if err != nil {
@@ -274,9 +302,10 @@ func main() {
 			"Devuelve ÚNICAMENTE un objeto JSON válido. NO uses bloques de código markdown (como ```json). NO agregues texto antes ni después. " +
 			"Usa exactamente estas llaves en minúscula con valores numéricos enteros: " +
 			"{\"food\": \"Nombre del plato\", \"calories\": 0, \"protein\": 0, \"carbs\": 0, \"fat\": 0, \"fiber\": 0}"
-		
+
 		log.Println("⏳ Enviando a Gemini...")
-		resp, err := model.GenerateContent(ctx, genai.Text(promptText), genai.ImageData(mimeType, imgBytes))
+		//resp, err := model.GenerateContent(ctx, genai.Text(promptText), genai.ImageData(mimeType, imgBytes))
+		resp, err := model.GenerateContent(ctx, genai.Text(promptText))
 		if err != nil {
 			log.Println(" Error de Gemini API:", err)
 			c.JSON(500, gin.H{"error": "Gemini falló al generar contenido", "details": err.Error()})
@@ -292,7 +321,7 @@ func main() {
 		// Extracción y LIMPIEZA del JSON
 		rawText := string(resp.Candidates[0].Content.Parts[0].(genai.Text))
 		log.Println("rawText original:", rawText) // Ver qué devolvió la IA
-		
+
 		rawText = strings.TrimPrefix(strings.TrimSpace(rawText), "```json")
 		rawText = strings.TrimPrefix(strings.TrimSpace(rawText), "```")
 		rawText = strings.TrimSuffix(strings.TrimSpace(rawText), "```")
@@ -394,19 +423,23 @@ func main() {
 		if result.Error != nil {
 			// Si no ha registrado comidas hoy, creamos el track solo con el agua
 			nuevoAgua := req.Amount
-			if nuevoAgua < 0 { nuevoAgua = 0 } // Evitar negativos
-			
+			if nuevoAgua < 0 {
+				nuevoAgua = 0
+			} // Evitar negativos
+
 			track = DailyTrack{
-				IDMacro:       activeMacro.IDMacro,
-				Water:         nuevoAgua,
-				DateTrack:     time.Now(),
+				IDMacro:   activeMacro.IDMacro,
+				Water:     nuevoAgua,
+				DateTrack: time.Now(),
 			}
 			db.Create(&track)
 		} else {
 			// Si ya existe, sumamos/restamos el agua
 			nuevoAgua := track.Water + req.Amount
-			if nuevoAgua < 0 { nuevoAgua = 0 }
-			
+			if nuevoAgua < 0 {
+				nuevoAgua = 0
+			}
+
 			db.Model(&track).Update("water", nuevoAgua)
 			track.Water = nuevoAgua
 		}
