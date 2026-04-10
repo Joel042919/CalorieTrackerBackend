@@ -35,7 +35,7 @@ type Formulario struct {
 	Meta              string    `gorm:"type:varchar(15)"`
 	VelocidadKgSemana float64   `gorm:"type:numeric(3,2)"`
 	FechaRegistro     time.Time `gorm:"type:date"`
-	isActive          bool      `gorm:"type:bool;default:true"`
+	IsActive          bool      `gorm:"type:bool;default:true"`
 }
 
 type Macro struct {
@@ -206,7 +206,7 @@ func main() {
 		var form Formulario
 
 		// 1. Verificar si hay un formulario registrado
-		if lasForm := db.Where("isActive=?", true).First(&form).Error; lasForm != nil {
+		if lasForm := db.Where("is_active=?", true).First(&form).Error; lasForm != nil {
 			// Si no hay, mandamos isRegistered: false y terminamos
 			c.JSON(200, gin.H{"isRegistered": false})
 			return
@@ -288,7 +288,7 @@ func main() {
 		/*file, header, err := c.Request.FormFile("image")
 		if err != nil {
 			log.Println(" Error leyendo imagen:", err)
-			c.JSON(400, gin.H{"error": "Se requiere una imagen válida"})
+			c.JSON(400,gin.H{"error": "Se requiere una imagen válida"})
 			return
 		}
 		defer file.Close()
@@ -343,7 +343,7 @@ func main() {
 			return
 		}
 		var activeForm Formulario
-		if err := db.Where("isActive = ?", true).First(&activeForm).Error; err != nil {
+		if err := db.Where("is_active = ?", true).First(&activeForm).Error; err != nil {
 			log.Println(" No se encontró un formulario activo:", err)
 			c.JSON(400, gin.H{"error": "Primero debes llenar tu formulario de metas"})
 			return
