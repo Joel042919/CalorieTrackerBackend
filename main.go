@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"log"
 	"os"
 	"strings"
@@ -36,6 +35,7 @@ type Formulario struct {
 	Meta              string    `gorm:"type:varchar(15)"`
 	VelocidadKgSemana float64   `gorm:"type:numeric(3,2)"`
 	FechaRegistro     time.Time `gorm:"type:date"`
+	isActive          bool      `gorm:"type:bool;default:true"`
 }
 
 type Macro struct {
@@ -70,6 +70,7 @@ type FoodLog struct {
 	Carbs        int
 	Fat          int
 	Fiber        int
+	TimeMeal     string `gorm:"type:varchar(10)"`
 }
 
 type GeminiNutritionResponse struct {
@@ -98,7 +99,7 @@ func isRateLimited() bool {
 	}
 
 	// Si pasó el filtro, guardamos la hora actual y dejamos pasar
-	globalLastReq = time.Now()
+	globalLastReq = loadTimeZone()
 	return false
 }
 
@@ -124,9 +125,10 @@ func calcularRequerimientos(f Formulario) Macro {
 
 	ajusteDiario := f.VelocidadKgSemana * 1100
 	caloriasMeta := tdee
-	if f.Meta == "bajar" {
+	switch f.Meta {
+	case "bajar":
 		caloriasMeta -= ajusteDiario
-	} else if f.Meta == "aumentar" {
+	case "aumentar":
 		caloriasMeta += ajusteDiario
 	}
 
@@ -155,6 +157,14 @@ func calcularRequerimientos(f Formulario) Macro {
 		Fiber:    int(fibra),
 		Water:    aguaLitros,
 	}
+}
+func loadTimeZone() time.Time {
+	loc, err := time.LoadLocation("America/Lima")
+	if err != nil {
+		log.Println("Error cargando zona horaria, usando local:", err)
+		loc = time.Local
+	}
+	return time.Now().In(loc)
 }
 
 // ==========================================
@@ -196,7 +206,7 @@ func main() {
 		var form Formulario
 
 		// 1. Verificar si hay un formulario registrado
-		if err := db.Order("fecha_registro desc").First(&form).Error; err != nil {
+		if lasForm := db.Where("isActive=?", true).First(&form).Error; lasForm != nil {
 			// Si no hay, mandamos isRegistered: false y terminamos
 			c.JSON(200, gin.H{"isRegistered": false})
 			return
@@ -207,7 +217,7 @@ func main() {
 		db.Where("id_formulario = ?", form.IDFormulario).First(&macros)
 
 		// 3. Buscar el registro exacto del DÍA DE HOY
-		hoyStr := time.Now().Format("2006-01-02")
+		hoyStr := loadTimeZone().Format("2006-01-02")
 		var track DailyTrack
 		var logs []FoodLog // Arreglo para guardar el historial de comidas
 
@@ -246,7 +256,7 @@ func main() {
 			return
 		}
 
-		f.FechaRegistro = time.Now()
+		f.FechaRegistro = loadTimeZone()
 
 		err := db.Transaction(func(tx *gorm.DB) error {
 			if err := tx.Create(&f).Error; err != nil {
@@ -273,8 +283,9 @@ func main() {
 			c.JSON(429, gin.H{"error": "Demasiadas solicitudes. Por favor espera 20 segundos."})
 			return
 		}
+		timeMeal := c.PostForm("timeMeal")
 		description := c.PostForm("description")
-		file, header, err := c.Request.FormFile("image")
+		/*file, header, err := c.Request.FormFile("image")
 		if err != nil {
 			log.Println(" Error leyendo imagen:", err)
 			c.JSON(400, gin.H{"error": "Se requiere una imagen válida"})
@@ -284,7 +295,7 @@ func main() {
 
 		imgBytes, _ := io.ReadAll(file)
 		mimeType := strings.TrimPrefix(header.Header.Get("Content-Type"), "image/")
-		log.Println(" Imagen recibida:", mimeType, len(imgBytes), "bytes")
+		log.Println(" Imagen recibida:", mimeType, len(imgBytes), "bytes")*/
 
 		ctx := context.Background()
 		client, err := genai.NewClient(ctx, option.WithAPIKey(os.Getenv("GEMINI_API_KEY")))
@@ -297,14 +308,14 @@ func main() {
 
 		model := client.GenerativeModel("gemini-2.5-flash")
 
-		promptText := "Eres un nutricionista. Analiza la imagen. Contexto extra: '" + description + "'. " +
+		promptText := "Eres un nutricionista. En base al descripción exacta del usuario determina sus calorias y macros ingeridos: '" + description + "'. " +
 			"Devuelve ÚNICAMENTE un objeto JSON válido. NO uses bloques de código markdown (como ```json). NO agregues texto antes ni después. " +
 			"Usa exactamente estas llaves en minúscula con valores numéricos enteros: " +
 			"{\"food\": \"Nombre del plato\", \"calories\": 0, \"protein\": 0, \"carbs\": 0, \"fat\": 0, \"fiber\": 0}"
 
 		log.Println("⏳ Enviando a Gemini...")
-		resp, err := model.GenerateContent(ctx, genai.Text(promptText), genai.ImageData(mimeType, imgBytes))
-		//resp, err := model.GenerateContent(ctx, genai.Text(promptText))
+		//resp, err := model.GenerateContent(ctx, genai.Text(promptText), genai.ImageData(mimeType, imgBytes))
+		resp, err := model.GenerateContent(ctx, genai.Text(promptText))
 		if err != nil {
 			log.Println(" Error de Gemini API:", err)
 			c.JSON(500, gin.H{"error": "Gemini falló al generar contenido", "details": err.Error()})
@@ -319,7 +330,6 @@ func main() {
 
 		// Extracción y LIMPIEZA del JSON
 		rawText := string(resp.Candidates[0].Content.Parts[0].(genai.Text))
-		log.Println("rawText original:", rawText) // Ver qué devolvió la IA
 
 		rawText = strings.TrimPrefix(strings.TrimSpace(rawText), "```json")
 		rawText = strings.TrimPrefix(strings.TrimSpace(rawText), "```")
@@ -332,21 +342,24 @@ func main() {
 			c.JSON(500, gin.H{"error": "Error parseando la respuesta de la IA"})
 			return
 		}
-		log.Println(" JSON parseado con éxito:", geminiData)
-
+		var activeForm Formulario
+		if err := db.Where("isActive = ?", true).First(&activeForm).Error; err != nil {
+			log.Println(" No se encontró un formulario activo:", err)
+			c.JSON(400, gin.H{"error": "Primero debes llenar tu formulario de metas"})
+			return
+		}
 		var activeMacro Macro
 		// Buscamos el macro asegurándonos de manejar si no existe
-		if err := db.Order("id_macro desc").First(&activeMacro).Error; err != nil {
+		if err := db.Where("id_form = ?", activeForm.IDFormulario).First(&activeMacro).Error; err != nil {
 			log.Println(" No se encontró un Macro activo:", err)
 			c.JSON(400, gin.H{"error": "Primero debes llenar tu formulario de metas"})
 			return
 		}
 
-		hoy := time.Now().Format("2006-01-02")
+		hoy := loadTimeZone().Format("2006-01-02")
 		var track DailyTrack
 		result := db.Where("date_track = ?", hoy).First(&track)
 
-		log.Println(" Guardando en BD...")
 		errDB := db.Transaction(func(tx *gorm.DB) error {
 			if result.Error != nil {
 				track = DailyTrack{
@@ -356,7 +369,7 @@ func main() {
 					Carbs:         geminiData.Carbs,
 					Fat:           geminiData.Fat,
 					Fiber:         geminiData.Fiber,
-					DateTrack:     time.Now(),
+					DateTrack:     loadTimeZone(),
 				}
 				if err := tx.Create(&track).Error; err != nil {
 					return err
@@ -381,6 +394,7 @@ func main() {
 				Carbs:        geminiData.Carbs,
 				Fat:          geminiData.Fat,
 				Fiber:        geminiData.Fiber,
+				TimeMeal:     timeMeal,
 			}
 			if err := tx.Create(&foodLog).Error; err != nil {
 				return err
@@ -389,7 +403,7 @@ func main() {
 		})
 
 		if errDB != nil {
-			log.Println("❌ Error en Transacción BD:", errDB)
+			log.Println(" Error en Transacción BD:", errDB)
 			c.JSON(500, gin.H{"error": "Error al guardar en la base de datos"})
 			return
 		}
@@ -415,7 +429,7 @@ func main() {
 			return
 		}
 
-		hoy := time.Now().Format("2006-01-02")
+		hoy := loadTimeZone().Format("2006-01-02")
 		var track DailyTrack
 		result := db.Where("date_track = ?", hoy).First(&track)
 
@@ -429,7 +443,7 @@ func main() {
 			track = DailyTrack{
 				IDMacro:   activeMacro.IDMacro,
 				Water:     nuevoAgua,
-				DateTrack: time.Now(),
+				DateTrack: loadTimeZone(),
 			}
 			db.Create(&track)
 		} else {
