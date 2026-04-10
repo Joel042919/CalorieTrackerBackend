@@ -350,7 +350,7 @@ func main() {
 		}
 		var activeMacro Macro
 		// Buscamos el macro asegurándonos de manejar si no existe
-		if err := db.Where("id_form = ?", activeForm.IDFormulario).First(&activeMacro).Error; err != nil {
+		if err := db.Where("id_formulario = ?", activeForm.IDFormulario).First(&activeMacro).Error; err != nil {
 			log.Println(" No se encontró un Macro activo:", err)
 			c.JSON(400, gin.H{"error": "Primero debes llenar tu formulario de metas"})
 			return
